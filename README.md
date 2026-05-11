@@ -47,6 +47,15 @@ Rendering of `Package.swift` / podspec templates is the caller's responsibility 
 | `commit-author-name` | no | `github-actions[bot]` | Git author name |
 | `commit-author-email` | no | `41898282+github-actions[bot]@users.noreply.github.com` | Git author email |
 | `pr-body` | no | `""` | Extra text appended to the PR body |
+| `release-body` | no | `""` | Extra text appended to the draft release notes |
+
+Both the PR and draft release default to a body that links back to the source workflow run:
+
+```
+Built by [`livekit/webrtc-build`](https://github.com/livekit/webrtc-build/actions/runs/12345)
+```
+
+The PR body additionally includes a `> [!IMPORTANT]` reminder to merge before publishing the release. `pr-body` and `release-body` are appended below this default.
 
 ## Outputs
 
