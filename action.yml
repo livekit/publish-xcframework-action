@@ -34,9 +34,17 @@ inputs:
     required: false
     default: '41898282+github-actions[bot]@users.noreply.github.com'
   pr-body:
-    description: Extra text for the PR body
+    description: Extra text appended to the PR body
     required: false
     default: ''
+    # The default PR body links to the source repo's workflow run, lists assets
+    # in a table, and warns to merge before publishing the draft release.
+  release-body:
+    description: Extra text appended to the draft release notes
+    required: false
+    default: ''
+    # The default release body links to the source repo's workflow run and
+    # lists assets in a table.
 
 outputs:
   checksum:
@@ -79,7 +87,23 @@ runs:
         echo "Asset name: ${ASSET_NAME}"
         echo "Branch: ${BRANCH}"
 
-    # Step 3: Clone the hosting repo
+    # Step 3: Refuse to overwrite an existing release (draft or published).
+    # Must run before any destructive action (branch deletion, etc.).
+    # To retry a failed draft publish, delete the draft release first:
+    #   gh release delete <version> --repo <hosting-repo> --cleanup-tag
+    - name: Guard against overwrite
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        VERSION="${{ inputs.version }}"
+        REPO="${{ inputs.hosting-repo }}"
+        if gh release view "${VERSION}" --repo "${REPO}" >/dev/null 2>&1; then
+          echo "::error::Release ${VERSION} already exists on ${REPO}. Refusing to overwrite. To retry a failed draft, delete the draft release first."
+          exit 1
+        fi
+
+    # Step 4: Clone the hosting repo
     - name: Clone hosting repo
       shell: bash
       env:
@@ -89,7 +113,7 @@ runs:
         git clone "https://x-access-token:${TOKEN}@github.com/${{ inputs.hosting-repo }}.git" \
           "${{ runner.temp }}/hosting-repo"
 
-    # Step 4: Create release branch
+    # Step 5: Create release branch
     - name: Create release branch
       shell: bash
       working-directory: ${{ runner.temp }}/hosting-repo
@@ -111,7 +135,7 @@ runs:
 
         git checkout -b "${BRANCH}"
 
-    # Step 5: Copy files
+    # Step 6: Copy files
     - name: Copy files
       shell: bash
       env:
@@ -136,7 +160,7 @@ runs:
           cp "${SRC}" "${HOSTING_REPO}/${DST}"
         done
 
-    # Step 6: Commit and push
+    # Step 7: Commit and push
     - name: Commit and push
       shell: bash
       working-directory: ${{ runner.temp }}/hosting-repo
@@ -153,17 +177,60 @@ runs:
         git commit -m "v${{ inputs.version }}"
         git push -u origin "${BRANCH}"
 
-    # Step 7: Create draft release
+    # Step 8: Derive body templates shared by PR and release
+    - name: Build body templates
+      id: body
+      shell: bash
+      env:
+        EXTRA_PR_BODY: ${{ inputs.pr-body }}
+        EXTRA_RELEASE_BODY: ${{ inputs.release-body }}
+      run: |
+        # github.repository is the calling workflow's repo (the source), not
+        # this action's repo — even when invoked as a composite action.
+        SOURCE_REPO="${{ github.repository }}"
+        SHA="${{ github.sha }}"
+        SHORT_SHA="${SHA:0:7}"
+        COMMIT_URL="${{ github.server_url }}/${SOURCE_REPO}/commit/${SHA}"
+
+        SOURCE_LINK="Built by [\`${SOURCE_REPO}@${SHORT_SHA}\`](${COMMIT_URL})"
+
+        RELEASE_BODY="${SOURCE_LINK}"
+        if [ -n "${EXTRA_RELEASE_BODY}" ]; then
+          RELEASE_BODY="${RELEASE_BODY}
+
+        ${EXTRA_RELEASE_BODY}"
+        fi
+
+        PR_BODY="${SOURCE_LINK}
+
+        > [!IMPORTANT]
+        > Merge this PR first, then publish the draft release."
+        if [ -n "${EXTRA_PR_BODY}" ]; then
+          PR_BODY="${PR_BODY}
+
+        ${EXTRA_PR_BODY}"
+        fi
+
+        {
+          echo "release-body<<__EOF__"
+          echo "${RELEASE_BODY}"
+          echo "__EOF__"
+          echo "pr-body<<__EOF__"
+          echo "${PR_BODY}"
+          echo "__EOF__"
+        } >> "$GITHUB_OUTPUT"
+
+    # Step 9: Create draft release
     - name: Create draft release
       id: release
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
+        RELEASE_BODY: ${{ steps.body.outputs.release-body }}
       run: |
         ASSET_PATH="${{ inputs.xcframework-zip }}"
         ASSET_NAME="${{ steps.vars.outputs.asset-name }}"
         VERSION="${{ inputs.version }}"
-        CHECKSUM="${{ steps.checksum.outputs.checksum }}"
         REPO="${{ inputs.hosting-repo }}"
 
         RELEASE_URL=$(gh release create "${VERSION}" \
@@ -171,44 +238,30 @@ runs:
           --repo "${REPO}" \
           --draft \
           --title "v${VERSION}" \
-          --notes "checksum: ${CHECKSUM}")
+          --notes "${RELEASE_BODY}")
 
         RELEASE_ID=$(gh release view "${VERSION}" --repo "${REPO}" --json databaseId --jq '.databaseId')
         echo "release-id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
         echo "Release URL: ${RELEASE_URL}"
 
-    # Step 8: Open PR
+    # Step 10: Open PR
     - name: Open PR
       id: pr
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
-        EXTRA_BODY: ${{ inputs.pr-body }}
+        PR_BODY: ${{ steps.body.outputs.pr-body }}
       run: |
         VERSION="${{ inputs.version }}"
-        CHECKSUM="${{ steps.checksum.outputs.checksum }}"
-        ASSET_NAME="${{ steps.vars.outputs.asset-name }}"
         BRANCH="${{ steps.vars.outputs.branch }}"
         REPO="${{ inputs.hosting-repo }}"
-
-        BODY="**Checksum:** \`${CHECKSUM}\`
-        **Asset:** ${ASSET_NAME}
-
-        > [!IMPORTANT]
-        > Merge this PR first, then publish the draft release."
-
-        if [ -n "${EXTRA_BODY}" ]; then
-          BODY="${BODY}
-
-        ${EXTRA_BODY}"
-        fi
 
         PR_URL=$(gh pr create \
           --repo "${REPO}" \
           --base "${DEFAULT_BRANCH}" \
           --head "${BRANCH}" \
           --title "v${VERSION}" \
-          --body "${BODY}")
+          --body "${PR_BODY}")
 
         PR_NUMBER=$(gh pr view "${BRANCH}" --repo "${REPO}" --json number --jq '.number')
         echo "pr-number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
