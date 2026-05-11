@@ -87,7 +87,23 @@ runs:
         echo "Asset name: ${ASSET_NAME}"
         echo "Branch: ${BRANCH}"
 
-    # Step 3: Clone the hosting repo
+    # Step 3: Refuse to overwrite an existing release (draft or published).
+    # Must run before any destructive action (branch deletion, etc.).
+    # To retry a failed draft publish, delete the draft release first:
+    #   gh release delete <version> --repo <hosting-repo> --cleanup-tag
+    - name: Guard against overwrite
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        VERSION="${{ inputs.version }}"
+        REPO="${{ inputs.hosting-repo }}"
+        if gh release view "${VERSION}" --repo "${REPO}" >/dev/null 2>&1; then
+          echo "::error::Release ${VERSION} already exists on ${REPO}. Refusing to overwrite. To retry a failed draft, delete the draft release first."
+          exit 1
+        fi
+
+    # Step 4: Clone the hosting repo
     - name: Clone hosting repo
       shell: bash
       env:
@@ -97,7 +113,7 @@ runs:
         git clone "https://x-access-token:${TOKEN}@github.com/${{ inputs.hosting-repo }}.git" \
           "${{ runner.temp }}/hosting-repo"
 
-    # Step 4: Create release branch
+    # Step 5: Create release branch
     - name: Create release branch
       shell: bash
       working-directory: ${{ runner.temp }}/hosting-repo
@@ -119,7 +135,7 @@ runs:
 
         git checkout -b "${BRANCH}"
 
-    # Step 5: Copy files
+    # Step 6: Copy files
     - name: Copy files
       shell: bash
       env:
@@ -144,7 +160,7 @@ runs:
           cp "${SRC}" "${HOSTING_REPO}/${DST}"
         done
 
-    # Step 6: Commit and push
+    # Step 7: Commit and push
     - name: Commit and push
       shell: bash
       working-directory: ${{ runner.temp }}/hosting-repo
@@ -161,7 +177,7 @@ runs:
         git commit -m "v${{ inputs.version }}"
         git push -u origin "${BRANCH}"
 
-    # Step 7: Derive body templates shared by PR and release
+    # Step 8: Derive body templates shared by PR and release
     - name: Build body templates
       id: body
       shell: bash
@@ -200,7 +216,7 @@ runs:
           echo "__EOF__"
         } >> "$GITHUB_OUTPUT"
 
-    # Step 8: Create draft release
+    # Step 9: Create draft release
     - name: Create draft release
       id: release
       shell: bash
@@ -224,7 +240,7 @@ runs:
         echo "release-id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
         echo "Release URL: ${RELEASE_URL}"
 
-    # Step 9: Open PR
+    # Step 10: Open PR
     - name: Open PR
       id: pr
       shell: bash
