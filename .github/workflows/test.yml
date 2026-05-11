@@ -1,0 +1,57 @@
+name: Test publish-xcframework
+on:
+  workflow_dispatch:
+    inputs:
+      hosting-repo:
+        description: Target repo to publish to (owner/name)
+        required: true
+      version:
+        description: Test version tag
+        required: false
+        default: '0.0.1-test'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create test artifact
+        run: |
+          mkdir -p TestFramework.xcframework
+          echo "dummy" > TestFramework.xcframework/Info.plist
+          zip -r TestFramework.xcframework.zip TestFramework.xcframework
+
+      - name: Compute checksum
+        id: cs
+        run: echo "checksum=$(shasum -a 256 TestFramework.xcframework.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Render Package.swift
+        env:
+          REPO: ${{ inputs.hosting-repo }}
+          VERSION: ${{ inputs.version }}
+          CHECKSUM: ${{ steps.cs.outputs.checksum }}
+        run: |
+          cat > /tmp/Package.swift << EOF
+          // swift-tools-version: 5.9
+          import PackageDescription
+          let package = Package(
+              name: "TestFramework",
+              targets: [
+                  .binaryTarget(
+                      name: "TestFramework",
+                      url: "https://github.com/${REPO}/releases/download/${VERSION}/TestFramework.xcframework.zip",
+                      checksum: "${CHECKSUM}"
+                  )
+              ]
+          )
+          EOF
+
+      - uses: ./
+        with:
+          xcframework-zip: ./TestFramework.xcframework.zip
+          version: ${{ inputs.version }}
+          hosting-repo: ${{ inputs.hosting-repo }}
+          files: |
+            /tmp/Package.swift:Package.swift
+          token: ${{ secrets.TEST_HOSTING_PAT }}

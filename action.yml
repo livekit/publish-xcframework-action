@@ -1,0 +1,216 @@
+name: Publish XCFramework
+description: >
+  Publish an XCFramework zip to a hosting repo via draft release + PR.
+  Copies caller-provided files (Package.swift, podspec, sources) as-is.
+
+inputs:
+  xcframework-zip:
+    description: Path to the .xcframework.zip file
+    required: true
+  version:
+    description: Version tag (e.g., 0.0.5)
+    required: true
+  hosting-repo:
+    description: Target repo in owner/name format
+    required: true
+  files:
+    description: >
+      Newline-separated source:destination pairs.
+      Files are copied verbatim — render any templates before calling this action.
+    required: true
+  token:
+    description: GitHub PAT with repo access to hosting repo
+    required: true
+  branch-prefix:
+    description: Prefix for release branch name
+    required: false
+    default: 'release/'
+  commit-author-name:
+    description: Git author name
+    required: false
+    default: 'github-actions[bot]'
+  commit-author-email:
+    description: Git author email
+    required: false
+    default: '41898282+github-actions[bot]@users.noreply.github.com'
+  pr-body:
+    description: Extra text for the PR body
+    required: false
+    default: ''
+
+outputs:
+  checksum:
+    description: SHA256 of the xcframework zip
+    value: ${{ steps.checksum.outputs.checksum }}
+  release-id:
+    description: GitHub release ID
+    value: ${{ steps.release.outputs.release-id }}
+  pr-number:
+    description: PR number
+    value: ${{ steps.pr.outputs.pr-number }}
+  pr-url:
+    description: PR URL
+    value: ${{ steps.pr.outputs.pr-url }}
+  branch:
+    description: Created branch name
+    value: ${{ steps.vars.outputs.branch }}
+
+runs:
+  using: composite
+  steps:
+    # Step 1: Compute SHA256 checksum
+    - name: Compute checksum
+      id: checksum
+      shell: bash
+      run: |
+        CHECKSUM=$(shasum -a 256 "${{ inputs.xcframework-zip }}" | awk '{print $1}')
+        echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+        echo "Checksum: ${CHECKSUM}"
+
+    # Step 2: Derive variables
+    - name: Derive variables
+      id: vars
+      shell: bash
+      run: |
+        ASSET_NAME=$(basename "${{ inputs.xcframework-zip }}")
+        BRANCH="${{ inputs.branch-prefix }}${{ inputs.version }}"
+        echo "asset-name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+        echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+        echo "Asset name: ${ASSET_NAME}"
+        echo "Branch: ${BRANCH}"
+
+    # Step 3: Clone the hosting repo
+    - name: Clone hosting repo
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+      run: |
+        echo "::add-mask::${TOKEN}"
+        git clone "https://x-access-token:${TOKEN}@github.com/${{ inputs.hosting-repo }}.git" \
+          "${{ runner.temp }}/hosting-repo"
+
+    # Step 4: Create release branch
+    - name: Create release branch
+      shell: bash
+      working-directory: ${{ runner.temp }}/hosting-repo
+      run: |
+        git config user.name "${{ inputs.commit-author-name }}"
+        git config user.email "${{ inputs.commit-author-email }}"
+
+        DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')
+        echo "Default branch: ${DEFAULT_BRANCH}"
+        echo "DEFAULT_BRANCH=${DEFAULT_BRANCH}" >> "$GITHUB_ENV"
+
+        BRANCH="${{ steps.vars.outputs.branch }}"
+
+        # Delete remote branch if it exists (idempotency for retries)
+        if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+          echo "Branch ${BRANCH} already exists on remote, deleting for retry..."
+          git push origin --delete "${BRANCH}"
+        fi
+
+        git checkout -b "${BRANCH}"
+
+    # Step 5: Copy files
+    - name: Copy files
+      shell: bash
+      env:
+        FILES: ${{ inputs.files }}
+      run: |
+        HOSTING_REPO="${{ runner.temp }}/hosting-repo"
+
+        echo "${FILES}" | while IFS= read -r line; do
+          # Skip empty lines
+          [ -z "${line}" ] && continue
+
+          SRC="${line%%:*}"
+          DST="${line#*:}"
+
+          # Trim whitespace
+          SRC=$(echo "${SRC}" | xargs)
+          DST=$(echo "${DST}" | xargs)
+
+          echo "Copying: ${SRC} -> ${DST}"
+
+          mkdir -p "$(dirname "${HOSTING_REPO}/${DST}")"
+          cp "${SRC}" "${HOSTING_REPO}/${DST}"
+        done
+
+    # Step 6: Commit and push
+    - name: Commit and push
+      shell: bash
+      working-directory: ${{ runner.temp }}/hosting-repo
+      run: |
+        BRANCH="${{ steps.vars.outputs.branch }}"
+
+        git add -A
+
+        if git diff --cached --quiet; then
+          echo "::error::No changes detected after copying files"
+          exit 1
+        fi
+
+        git commit -m "v${{ inputs.version }}"
+        git push -u origin "${BRANCH}"
+
+    # Step 7: Create draft release
+    - name: Create draft release
+      id: release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        ASSET_PATH="${{ inputs.xcframework-zip }}"
+        ASSET_NAME="${{ steps.vars.outputs.asset-name }}"
+        VERSION="${{ inputs.version }}"
+        CHECKSUM="${{ steps.checksum.outputs.checksum }}"
+        REPO="${{ inputs.hosting-repo }}"
+
+        RELEASE_URL=$(gh release create "${VERSION}" \
+          "${ASSET_PATH}#${ASSET_NAME}" \
+          --repo "${REPO}" \
+          --draft \
+          --title "v${VERSION}" \
+          --notes "checksum: ${CHECKSUM}")
+
+        RELEASE_ID=$(gh release view "${VERSION}" --repo "${REPO}" --json databaseId --jq '.databaseId')
+        echo "release-id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+        echo "Release URL: ${RELEASE_URL}"
+
+    # Step 8: Open PR
+    - name: Open PR
+      id: pr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        EXTRA_BODY: ${{ inputs.pr-body }}
+      run: |
+        VERSION="${{ inputs.version }}"
+        CHECKSUM="${{ steps.checksum.outputs.checksum }}"
+        ASSET_NAME="${{ steps.vars.outputs.asset-name }}"
+        BRANCH="${{ steps.vars.outputs.branch }}"
+        REPO="${{ inputs.hosting-repo }}"
+
+        BODY="**Checksum:** \`${CHECKSUM}\`
+        **Asset:** ${ASSET_NAME}
+
+        > [!IMPORTANT]
+        > Merge this PR first, then publish the draft release."
+
+        if [ -n "${EXTRA_BODY}" ]; then
+          BODY="${BODY}
+
+        ${EXTRA_BODY}"
+        fi
+
+        PR_URL=$(gh pr create \
+          --repo "${REPO}" \
+          --base "${DEFAULT_BRANCH}" \
+          --head "${BRANCH}" \
+          --title "v${VERSION}" \
+          --body "${BODY}")
+
+        PR_NUMBER=$(gh pr view "${BRANCH}" --repo "${REPO}" --json number --jq '.number')
+        echo "pr-number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+        echo "pr-url=${PR_URL}" >> "$GITHUB_OUTPUT"
+        echo "PR: ${PR_URL}"
