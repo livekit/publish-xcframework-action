@@ -141,24 +141,33 @@ runs:
       env:
         FILES: ${{ inputs.files }}
       run: |
+        set -euo pipefail
         HOSTING_REPO="${{ runner.temp }}/hosting-repo"
 
-        echo "${FILES}" | while IFS= read -r line; do
-          # Skip empty lines
+        # Heredoc instead of pipe to keep the loop in the parent shell so a
+        # failure aborts the whole step (echo|while puts the body in a subshell
+        # and a failure there is easy to swallow). Each source file is checked
+        # explicitly so a missing file produces a clear error rather than a
+        # partial release.
+        while IFS= read -r line; do
           [ -z "${line}" ] && continue
 
           SRC="${line%%:*}"
           DST="${line#*:}"
 
-          # Trim whitespace
           SRC=$(echo "${SRC}" | xargs)
           DST=$(echo "${DST}" | xargs)
+
+          if [ ! -f "${SRC}" ]; then
+            echo "::error::Source file not found: ${SRC}"
+            exit 1
+          fi
 
           echo "Copying: ${SRC} -> ${DST}"
 
           mkdir -p "$(dirname "${HOSTING_REPO}/${DST}")"
           cp "${SRC}" "${HOSTING_REPO}/${DST}"
-        done
+        done <<< "${FILES}"
 
     # Step 7: Commit and push
     - name: Commit and push
