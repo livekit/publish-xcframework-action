@@ -246,7 +246,7 @@ runs:
           "${ASSET_PATH}#${ASSET_NAME}" \
           --repo "${REPO}" \
           --draft \
-          --title "v${VERSION}" \
+          --title "${VERSION}" \
           --notes "${RELEASE_BODY}")
 
         RELEASE_ID=$(gh release view "${VERSION}" --repo "${REPO}" --json databaseId --jq '.databaseId')
