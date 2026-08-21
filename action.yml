@@ -16,6 +16,9 @@ inputs:
   files:
     description: >
       Newline-separated source:destination pairs.
+      Sources are path patterns; a destination ending in '/' is a directory and
+      every match keeps its basename, otherwise it names a single file. A source
+      matching nothing fails the action. Lines starting with '#' are ignored.
       Files are copied verbatim — render any templates before calling this action.
     required: true
   token:
@@ -149,8 +152,17 @@ runs:
         # and a failure there is easy to swallow). Each source file is checked
         # explicitly so a missing file produces a clear error rather than a
         # partial release.
+        copy_one() {
+          echo "Copying: $1 -> $2"
+          mkdir -p "$(dirname "${HOSTING_REPO}/$2")"
+          cp "$1" "${HOSTING_REPO}/$2"
+        }
+
         while IFS= read -r line; do
           [ -z "${line}" ] && continue
+          # Comments, so a long list can be annotated without the text being
+          # mistaken for a path.
+          case "${line}" in \#*) continue ;; esac
 
           SRC="${line%%:*}"
           DST="${line#*:}"
@@ -158,15 +170,44 @@ runs:
           SRC=$(echo "${SRC}" | xargs)
           DST=$(echo "${DST}" | xargs)
 
-          if [ ! -f "${SRC}" ]; then
-            echo "::error::Source file not found: ${SRC}"
+          # Sources are patterns, as in actions/upload-artifact and
+          # softprops/action-gh-release: a literal path is simply a pattern that
+          # matches only itself. Literals are resolved first so a name containing
+          # a glob metacharacter, or a space, keeps working.
+          if [ -f "${SRC}" ]; then
+            matches=("${SRC}")
+          else
+            matches=()
+            for match in ${SRC}; do
+              [ -f "${match}" ] && matches[${#matches[@]}]="${match}"
+            done
+          fi
+
+          # Matching nothing is an error for the same reason a missing file is:
+          # it would publish a silently incomplete release.
+          if [ ${#matches[@]} -eq 0 ]; then
+            echo "::error::No files match source: ${SRC}"
             exit 1
           fi
 
-          echo "Copying: ${SRC} -> ${DST}"
-
-          mkdir -p "$(dirname "${HOSTING_REPO}/${DST}")"
-          cp "${SRC}" "${HOSTING_REPO}/${DST}"
+          case "${DST}" in
+            */)
+              # Directory destination: every match keeps its own basename. Use this
+              # for sets whose members aren't known up front, such as one generated
+              # source file per module.
+              for match in "${matches[@]}"; do
+                copy_one "${match}" "${DST}${match##*/}"
+              done
+              ;;
+            *)
+              # A destination naming a file can only take one.
+              if [ ${#matches[@]} -ne 1 ]; then
+                echo "::error::${#matches[@]} files match '${SRC}' but '${DST}' names a single file; end the destination with '/' to copy them into a directory"
+                exit 1
+              fi
+              copy_one "${matches[0]}" "${DST}"
+              ;;
+          esac
         done <<< "${FILES}"
 
     # Step 7: Commit and push
