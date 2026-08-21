@@ -41,7 +41,7 @@ Rendering of `Package.swift` / podspec templates is the caller's responsibility 
 | `xcframework-zip` | yes | — | Path to the `.xcframework.zip` file |
 | `version` | yes | — | Version tag (e.g., `0.0.5`) |
 | `hosting-repo` | yes | — | Target repo in `owner/name` format |
-| `files` | yes | — | Newline-separated `source:destination` pairs, copied verbatim |
+| `files` | yes | — | Newline-separated `source:destination` pairs, copied verbatim. See [File list](#file-list) |
 | `token` | yes | — | GitHub PAT with `contents: write` and `pull_requests: write` on the hosting repo |
 | `branch-prefix` | no | `release/` | Prefix for release branch name |
 | `commit-author-name` | no | `github-actions[bot]` | Git author name |
@@ -121,9 +121,35 @@ Order matters: **merge first, then publish**. This ensures the tag points to a c
       packages/swift/LiveKitUniFFI/Package.swift:Package.swift
       packages/swift/LiveKitUniFFI/Package@swift-6.2.swift:Package@swift-6.2.swift
       packages/swift/LiveKitUniFFI/LiveKitUniFFI.podspec:LiveKitUniFFI.podspec
-      packages/swift/LiveKitUniFFI/Sources/LiveKitUniFFI/livekit_uniffi.swift:Sources/LiveKitUniFFI/livekit_uniffi.swift
+      # one generated source per UniFFI component; matched rather than listed
+      packages/swift/LiveKitUniFFI/Sources/LiveKitUniFFI/*.swift:Sources/LiveKitUniFFI/
     token: ${{ secrets.SWIFT_PUBLISH_PAT }}
 ```
+
+## File list
+
+Each line of `files` is a `source:destination` pair. Sources are **path patterns**, following
+[`actions/upload-artifact`](https://github.com/actions/upload-artifact) and
+[`softprops/action-gh-release`](https://github.com/softprops/action-gh-release) — a literal path
+is just a pattern that matches only itself, so existing lists keep working unchanged.
+
+| Destination | Meaning |
+|-------------|---------|
+| ends with `/` | A directory. Every match is copied into it under its own basename. |
+| anything else | A single file. The source must match exactly one file, or the action fails. |
+
+Use a directory destination for file sets whose members aren't known up front — one generated
+source per module, say, where adding a module should not mean editing the workflow:
+
+```yaml
+files: |
+  out/Package.swift:Package.swift
+  out/Sources/MyLib/*.swift:Sources/MyLib/
+```
+
+A source matching nothing fails the action, so a renamed or missing file is caught rather than
+quietly producing an incomplete release. Literal paths are resolved before matching, so names
+containing spaces or glob metacharacters still work. Lines starting with `#` are ignored.
 
 ## Token Permissions
 
